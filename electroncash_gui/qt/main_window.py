@@ -1303,6 +1303,15 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 self.copy_to_clipboard(
                     uri, _('Receive request URI copied to clipboard'), uribut)
 
+        if self.wallet.wallet_type == 'rpa':
+            # Disable unnecessary fields
+            self.save_request_button.setEnabled(False)
+            self.new_request_button.setEnabled(False)
+            self.receive_message_e.setEnabled(False)
+            self.receive_amount_e.setEnabled(False)
+            self.fiat_receive_e.setEnabled(False)
+            self.expires_combo.setEnabled(False)
+
         # The QR code for the receive tab.
         if self.wallet.wallet_type is not 'rpa':
             # Do not attempt to show a QR code for RPA paycode wallets.  There is no URI scheme yet for RPA.
