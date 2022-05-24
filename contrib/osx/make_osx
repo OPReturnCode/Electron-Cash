@@ -6,12 +6,10 @@ test -n "$build_dir" -a -d "$build_dir" || (echo "Cannot determine build dir. FI
 . "$build_dir"/../base.sh # functions we use below
 
 OSX_COMPAT=""
-OSX_REQ_BIN="-osx"
 DARWIN_VER=$(uname -r | cut -f 1 -d .)
 if ((DARWIN_VER < 17)); then
     fail "Minimum OSX High Sierra is required to build"
 fi
-REQUIREMENTS_BINARIES="requirements-binaries${OSX_REQ_BIN}.txt"
 
 function DoCodeSignMaybe { # ARGS: infoName fileOrDirName codesignIdentity
     infoName="$1"
@@ -129,16 +127,61 @@ PYTHON_CONFIGURE_OPTS="--enable-framework" pyenv install -s $PYTHON_VERSION && \
 
 # We use a hashed requirements file for even the build tools to prevent
 # dependency attacks even in the build process
-info "Installing dmgbuild, requests, and other build tools we need..."
+info "Installing pip, dmgbuild, requests, and other build tools we need..."
 # Ensure we have wheel because otherwise we get warnings about not having it (even though below installs it again)
 python3 -m pip install --user --upgrade wheel || fail "Failed to install wheel"
+python3 -m pip install -I --user -r contrib/deterministic-build/requirements-pip.txt \
+    || fail "Could not install pip"
 python3 -m pip install -I --user -r contrib/osx/requirements-osx-build.txt \
-    || fail "Could not install osx-requirements"
+    || fail "Could not install osx build requirements"
 
+# Create the build directory in /tmp
+rm  -rf $BUILDDIR > /dev/null 2>&1
+mkdir -p $BUILDDIR
+
+info "Building PyInstaller."
+PYINSTALLER_REPO="https://github.com/pyinstaller/pyinstaller.git"
+PYINSTALLER_COMMIT="e20e74c03768d432d48665b8ef1e02511b16e4be"
+# ^ tag "4.3"
+# TODO test newer versions of pyinstaller for build-reproducibility.
+#      we are using this version for now due to change in code-signing behavior
+#      (https://github.com/pyinstaller/pyinstaller/pull/5581)
+(
+    if [ -f "$BUILDDIR/pyinstaller/PyInstaller/bootloader/Darwin-64bit/runw" ]; then
+        info "pyinstaller already built, skipping"
+        exit 0
+    fi
+    pushd "${build_dir}"
+    EC_COMMIT_HASH=$(git rev-parse HEAD)
+    pushd "$BUILDDIR"
+    rm -rf pyinstaller
+    mkdir pyinstaller
+    cd pyinstaller
+    # Shallow clone
+    git init
+    git remote add origin $PYINSTALLER_REPO
+    git fetch --depth 1 origin $PYINSTALLER_COMMIT
+    git checkout -b pinned "${PYINSTALLER_COMMIT}^{commit}"
+    rm -fv PyInstaller/bootloader/Darwin-*/run* || true
+    # add reproducible randomness. this ensures we build a different bootloader for each commit.
+    # if we built the same one for all releases, that might also get anti-virus false positives
+    echo "extern const char * const electron_cash_tag;" >> ./bootloader/src/pyi_main.c
+    echo "const char * const electron_cash_tag = \"tagged by Electron-Cash@$EC_COMMIT_HASH\";" >> ./bootloader/src/pyi_main.c
+    pushd bootloader
+    # compile bootloader
+    python3 ./waf all CFLAGS="-static"
+    popd
+    # sanity check bootloader is there:
+    [[ -e "PyInstaller/bootloader/Darwin-64bit/runw" ]] || fail "Could not find runw in target dir!"
+    rm pyinstaller.py  # workaround for https://github.com/pyinstaller/pyinstaller/pull/6701
+    popd # $BUILDDIR
+    popd # $build_dir
+) || fail "PyInstaller build failed"
 
 info "Installing PyInstaller"
-# Just use regular, latest PyInstaller 4.2+ from pypi
-python3 -m pip install pyinstaller --user --upgrade && pyenv rehash || fail "Could not install PyInstaller"
+# Use the one we just built above
+python3 -m pip install --user --upgrade --no-warn-script-location "$BUILDDIR/pyinstaller" \
+    && pyenv rehash || fail "Could not install PyInstaller"
 
 info "Using these versions for building $PACKAGE:"  # NB: PACKAGE var comes from ../base.sh
 sw_vers
@@ -147,9 +190,6 @@ echo -n "Pyinstaller "
 pyinstaller --version
 
 rm -rf ./dist
-
-rm  -rf $BUILDDIR > /dev/null 2>&1
-mkdir -p $BUILDDIR
 
 info "Making locale..."
 python3 ./contrib/make_locale || fail "Failed to make locale..."
@@ -188,7 +228,8 @@ contrib/make_zlib && contrib/make_libevent && contrib/make_openssl && contrib/ma
 
 info "Installing requirements..."
 python3 -m pip install -r ./contrib/deterministic-build/requirements.txt --user || fail "Could not install requirements"
-python3 -m pip install -r ./contrib/deterministic-build/${REQUIREMENTS_BINARIES} --user || fail "Could not install binary requirements"
+python3 -m pip install -r ./contrib/deterministic-build/requirements-binaries.txt --user || fail "Could not install binary requirements"
+python3 -m pip install --no-deps --no-warn-script-location -r ./contrib/deterministic-build/requirements-web3.txt --user || fail "Could not install web3 requirements"
 
 info "Installing hardware wallet requirements..."
 python3 -m pip install -r ./contrib/deterministic-build/requirements-hw.txt --user || \
@@ -226,6 +267,10 @@ plutil -insert 'NSCameraUsageDescription' \
 	-- dist/$PACKAGE.app/Contents/Info.plist \
 	|| fail "Could not add keys to Info.plist. Make sure the program 'plutil' exists and is installed."
 
+plutil -insert 'LSMinimumSystemVersion' \
+       -string '10.14.0' \
+	-- dist/$PACKAGE.app/Contents/Info.plist \
+	|| fail "Could not add keys to Info.plist. Make sure the program 'plutil' exists and is installed."
 
 FORCE_MOJAVE_DARK=1  # Set to 1 to try and add the Info.plist key to force mojave dark mode support.
                      # On PyQt 5.14.1, it doesn't work, but on 5.15.2 it does.

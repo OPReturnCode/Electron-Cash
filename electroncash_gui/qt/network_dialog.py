@@ -28,6 +28,7 @@
 
 import queue
 import socket
+import weakref
 from functools import partial
 
 from PyQt5.QtGui import *
@@ -35,11 +36,12 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 import PyQt5.QtCore as QtCore
 
-from electroncash import networks
+from electroncash import lns, networks
 from electroncash.i18n import _, pgettext
 from electroncash.interface import Interface
 from electroncash.network import serialize_server, deserialize_server, get_eligible_servers
 from electroncash.plugins import run_hook
+from electroncash.simple_config import SimpleConfig
 from electroncash.tor import TorController
 from electroncash.util import print_error, Weak, PrintError, in_main_thread
 
@@ -49,11 +51,14 @@ from .utils import UserPortValidator
 protocol_names = ['TCP', 'SSL']
 protocol_letters = 'ts'
 
-class NetworkDialog(MessageBoxMixin, QDialog):
+
+class NetworkDialog(MessageBoxMixin, OnDestroyedMixin, QDialog):
     network_updated_signal = pyqtSignal()
 
     def __init__(self, network, config):
         QDialog.__init__(self)
+        OnDestroyedMixin.__init__(self)
+        self.weak_network = network and weakref.ref(network)
         self.setWindowTitle(_('Network'))
         self.setMinimumSize(500, 350)
         self.nlayout = NetworkChoiceLayout(self, network, config)
@@ -74,13 +79,23 @@ class NetworkDialog(MessageBoxMixin, QDialog):
         self.refresh_timer.timeout.connect(self.network_updated_signal.emit)
         self.refresh_timer.setInterval(500)
 
+    def on_destroyed(self, obj):
+        if self.is_destroyed:
+            return
+        OnDestroyedMixin.on_destroyed(self, obj)
+        network = self.weak_network and self.weak_network()
+        if network:
+            network.unregister_callback(self.on_network)
+            print_error("NetworkDialog: unregistered callback")
+
     def jumpto(self, location : str):
         self.nlayout.jumpto(location)
 
     def on_network(self, event, *args):
         ''' This may run in network thread '''
         #print_error("[NetworkDialog] on_network:",event,*args)
-        self.network_updated_signal.emit() # this enqueues call to on_update in GUI thread
+        if not self.is_destroyed:
+            self.network_updated_signal.emit()  # this enqueues call to on_update in GUI thread
 
     @rate_limited(0.333) # limit network window updates to max 3 per second. More frequent isn't that useful anyway -- and on large wallets/big synchs the network spams us with events which we would rather collapse into 1
     def on_update(self):
@@ -390,10 +405,11 @@ class ServerListWidget(QTreeWidget):
             self.setAutoScroll(val)
 
 
-class NetworkChoiceLayout(QObject, PrintError):
+class NetworkChoiceLayout(QObject, OnDestroyedMixin, PrintError):
 
     def __init__(self, parent, network, config, wizard=False):
-        super().__init__(parent)
+        QObject.__init__(self, parent)
+        OnDestroyedMixin.__init__(self)
         self.network = network
         self.config = config
         self.protocol = None
@@ -419,9 +435,16 @@ class NetworkChoiceLayout(QObject, PrintError):
                     td.stop() # stops the tor detector when proxy_tab disappears
         self.proxy_tab = proxy_tab = ProxyTab()
         self.blockchain_tab = blockchain_tab = QWidget()
+        if lns.available:
+            self.lns_settings_tab = lns_settings_tab = LNSSettingsWidget(self.config, tabs)
+        else:
+            self.lns_settings_tab = lns_settings_tab = None
+
         tabs.addTab(blockchain_tab, _('Overview'))
         tabs.addTab(server_tab, _('Server'))
         tabs.addTab(proxy_tab, _('Proxy'))
+        if lns_settings_tab:
+            tabs.addTab(lns_settings_tab, QIcon(":icons/lns.png"), _('LNS'))
 
         if wizard:
             tabs.setCurrentIndex(1)
@@ -723,7 +746,7 @@ class NetworkChoiceLayout(QObject, PrintError):
 
     @in_main_thread
     def on_tor_port_changed(self, controller: TorController):
-        if not controller.active_socks_port or not controller.is_enabled() or not self.tor_use:
+        if self.is_destroyed or not controller.active_socks_port or not controller.is_enabled() or not self.tor_use:
             return
 
         # The Network class handles actually changing the port, we just
@@ -741,7 +764,7 @@ class NetworkChoiceLayout(QObject, PrintError):
             # Disallow changing the proxy settings when Tor is in use
             b = False
         for w in [self.proxy_mode, self.proxy_host, self.proxy_port, self.proxy_user, self.proxy_password]:
-            w.setEnabled(b)
+            w.setEnabled(bool(b))
 
     def get_set_server_flags(self):
         return (self.config.is_modifiable('server'),
@@ -980,6 +1003,8 @@ class NetworkChoiceLayout(QObject, PrintError):
 
     @in_main_thread
     def on_tor_status_changed(self, controller):
+        if self.is_destroyed:
+            return
         if controller.status == TorController.Status.ERRORED and self.tabs.isVisible():
             tbname = self._tor_client_names[self.network.tor_controller.tor_binary_type]
             msg = _("The {tor_binary_name} client experienced an error or could not be started.").format(tor_binary_name=tbname)
@@ -990,7 +1015,7 @@ class NetworkChoiceLayout(QObject, PrintError):
         self.network.tor_controller.set_socks_port(socks_port)
 
     def on_custom_port_cb_click(self, b):
-        self.tor_socks_port.setEnabled(b)
+        self.tor_socks_port.setEnabled(bool(b))
         if not b:
             self.tor_socks_port.setText("0")
             self.set_tor_socks_port()
@@ -1058,16 +1083,118 @@ class NetworkChoiceLayout(QObject, PrintError):
             return True
         return False
 
+class LNSSettingsWidget(QWidget):
+    def __init__(self, config: SimpleConfig, parent=None):
+        super().__init__(parent)
+        self.config = config
 
-class TorDetector(QThread):
+        main_layout = QVBoxLayout(self)
+
+        box = QGroupBox(_("Network"))
+        main_layout.addWidget(box, 0, Qt.AlignTop | Qt.AlignHCenter)
+        slayout = QVBoxLayout(box)
+
+        grid = QGridLayout() ; slayout.addLayout(grid)
+
+        grid.addWidget(QLabel(_("SmartBCH RPC Server")), 0, 0)
+        hbox = QHBoxLayout(); grid.addLayout(hbox, 0, 1)
+        self.combo_rpc_server = QComboBox()
+        self.combo_rpc_server.setEditable(True)
+        self.combo_rpc_server.setInsertPolicy(QComboBox.NoInsert)
+        self.combo_rpc_server.setCompleter(None)
+        self.combo_rpc_server.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_rpc_server.activated.connect(self.combo_rpc_server_activated)
+        self.combo_rpc_server.lineEdit().textEdited.connect(self.user_changed_rpc_server)
+        self.rpc_servers = lns.rpc_servers
+        self.combo_rpc_server.addItems([s for s in self.rpc_servers])
+        hbox.addWidget(self.combo_rpc_server)
+
+        grid.addWidget(QLabel(_("LNS Graph Server")), 1, 0)
+        hbox = QHBoxLayout(); grid.addLayout(hbox, 1, 1)
+        self.combo_graph_server = QComboBox()
+        self.combo_graph_server.setEditable(True)
+        self.combo_graph_server.setInsertPolicy(QComboBox.NoInsert)
+        self.combo_graph_server.setCompleter(None)
+        self.combo_graph_server.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_graph_server.activated.connect(self.combo_graph_server_activated)
+        self.combo_graph_server.lineEdit().textEdited.connect(self.user_changed_graph_server)
+        self.graph_servers = lns.graph_servers
+        self.combo_graph_server.addItems([s for s in self.graph_servers])
+        hbox.addWidget(self.combo_graph_server)
+
+        self.refresh()
+
+    def update_rpc_server(self):
+        # called initially / when config changes
+        n_srv = len(self.rpc_servers)
+        rpc_server = self.config.get('lns_rpc_server', self.rpc_servers[0])
+        if rpc_server not in self.rpc_servers:
+            # Remove phantom item that corresponds to what the user entered
+            while n_srv < self.combo_rpc_server.count():
+                self.combo_rpc_server.removeItem(self.combo_rpc_server.count()-1)
+            self.combo_rpc_server.addItem(rpc_server)
+            self.combo_rpc_server.setCurrentIndex(n_srv)
+            self.combo_rpc_server.setEditText(rpc_server)
+        else:
+            index = self.rpc_servers.index(rpc_server)
+            self.combo_rpc_server.setCurrentIndex(index)
+            self.combo_rpc_server.setEditText(rpc_server)
+
+    def combo_rpc_server_activated(self, index):
+        # only triggered when user selects a combo item
+        self.config.set_key('lns_rpc_server', self.rpc_servers[index])
+        self.refresh()
+
+    def user_changed_rpc_server(self, *args):
+        # user edited the server
+        rpc_server = self.combo_rpc_server.currentText()
+        self.config.set_key('lns_rpc_server', rpc_server)
+        self.refresh()
+
+    def update_graph_server(self):
+        # called initially / when config changes
+        n_srv = len(self.graph_servers)
+        graph_server = self.config.get('lns_graph_server', self.graph_servers[0])
+        if graph_server not in self.graph_servers:
+            # Remove phantom item that corresponds to what the user entered
+            while n_srv < self.combo_graph_server.count():
+                self.combo_graph_server.removeItem(self.combo_graph_server.count()-1)
+            self.combo_graph_server.addItem(graph_server)
+            self.combo_graph_server.setCurrentIndex(n_srv)
+            self.combo_graph_server.setEditText(graph_server)
+        else:
+            index = self.graph_servers.index(graph_server)
+            self.combo_graph_server.setCurrentIndex(index)
+            self.combo_graph_server.setEditText(graph_server)
+
+    def combo_graph_server_activated(self, index):
+        # only triggered when user selects a combo item
+        self.config.set_key('lns_graph_server', self.graph_servers[index])
+        self.refresh()
+
+    def user_changed_graph_server(self, *args):
+        # user edited the server
+        graph_server = self.combo_graph_server.currentText()
+        self.config.set_key('lns_graph_server', graph_server)
+        self.refresh()
+
+    def refresh(self):
+        self.update_rpc_server()
+        self.update_graph_server()
+
+
+class TorDetector(QThread, OnDestroyedMixin):
     found_proxy = pyqtSignal(object)
 
     def __init__(self, parent, network):
-        super().__init__(parent)
+        QThread.__init__(self, parent)
+        OnDestroyedMixin.__init__(self)
         self.network = network
         self.network.tor_controller.active_port_changed.append_weak(self.on_tor_port_changed)
 
     def on_tor_port_changed(self, controller: TorController):
+        if self.is_destroyed:
+            return
         if controller.active_socks_port and self.isRunning():
             self.stopQ.put('kick')
 

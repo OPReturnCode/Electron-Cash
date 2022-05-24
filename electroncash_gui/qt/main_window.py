@@ -36,14 +36,14 @@ import traceback
 from decimal import Decimal as PyDecimal  # Qt 5.12 also exports Decimal
 from functools import partial
 from collections import OrderedDict
-from typing import List
+from typing import List, Optional
 
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 
 from electroncash import keystore, get_config
-from electroncash.address import Address, ScriptOutput
+from electroncash.address import Address, AddressError, ScriptOutput
 from electroncash.bitcoin import COIN, TYPE_ADDRESS, TYPE_SCRIPT
 from electroncash import networks
 from electroncash.plugins import run_hook
@@ -74,6 +74,7 @@ from .transaction_dialog import show_transaction
 from .fee_slider import FeeSlider
 from .popup_widget import ShowPopupLabel, KillPopupLabel
 from . import cashacctqt
+from . import lnsqt
 from .util import *
 
 try:
@@ -156,9 +157,16 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.externalpluginsdialog = None
         self.hardwarewalletdialog = None
         self.require_fee_update = False
-        self.tx_sound = self.setup_tx_rcv_sound()
         self.cashaddr_toggled_signal = self.gui_object.cashaddr_toggled_signal  # alias for backwards compatibility for plugins -- this signal used to live in each window and has since been refactored to gui-object where it belongs (since it's really an app-global setting)
         self.force_use_single_change_addr = None  # this is set by the CashShuffle plugin to a single string that will go into the tool-tip explaining why this preference option is disabled (see self.settings_dialog)
+        self.have_lns = lnsqt.available and self.wallet.lns
+        if self.have_lns:
+            self._update_lns_timer = QTimer(self)
+            self._update_lns_timer.timeout.connect(self.update_lns_contacts)
+            self._update_lns_timer.setInterval(600_000)  # 10 min update timer for LNS contacts
+            self._update_lns_timer.setSingleShot(False)
+        else:
+            self._update_lns_timer = None
         self.tl_windows = []
         self.tx_external_keypairs = {}
         self._tx_dialogs = Weak.Set()
@@ -256,39 +264,21 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         gui_object.timer.timeout.connect(self.timer_actions)
         self.fetch_alias()
 
-    def setup_tx_rcv_sound(self):
-        """Used only in the 'ard moné edition"""
-        if networks.net is not networks.TaxCoinNet:
-            return
-        try:
-            import PyQt5.QtMultimedia
-            from PyQt5.QtCore import QUrl, QResource
-            from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-            fileName = os.path.join(os.path.dirname(__file__), "data", "ard_mone.mp3")
-            url = QUrl.fromLocalFile(fileName)
-            self.print_error("Sound effect: loading from", url.toLocalFile())
-            player = QMediaPlayer(self)
-            player.setMedia(QMediaContent(url))
-            player.setVolume(100)
-            self.print_error("Sound effect: regustered successfully")
-            return player
-        except Exception as e:
-            self.print_error("Sound effect: Failed:", str(e))
-            return
-
-
-
-
     _first_shown = True
     def showEvent(self, event):
         super().showEvent(event)
         if event.isAccepted() and self._first_shown:
             self._first_shown = False
             weakSelf = Weak.ref(self)
-            # do this immediately after this event handler finishes -- noop on everything but linux
+            # do this immediately after this event handler finishes
             def callback():
                 strongSelf = weakSelf()
                 if strongSelf:
+                    if strongSelf.network and strongSelf.have_lns:
+                        strongSelf.update_lns_contacts()
+                        if strongSelf._update_lns_timer:
+                            strongSelf._update_lns_timer.start()
+                    # noop on everything but linux
                     strongSelf.gui_object.lin_win_maybe_show_highdpi_caveat_msg(strongSelf)
             QTimer.singleShot(0, callback)
 
@@ -517,7 +507,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.password_menu.setEnabled(self.wallet.can_change_password())
         self.import_privkey_menu.setVisible(self.wallet.can_import_privkey())
         self.import_address_menu.setVisible(self.wallet.can_import_address())
-        self.export_menu.setEnabled(self.wallet.can_export())
+        self.export_menu.setEnabled(bool(self.wallet.can_export()))
 
     def warn_if_watching_only(self):
         if self.wallet.is_watching_only():
@@ -626,7 +616,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             def loader(k):
                 return lambda: gui_object.new_window(k)
             self.recently_visited_menu.addAction(b, loader(k)).setShortcut(QKeySequence("Ctrl+%d"%(i+1)))
-        self.recently_visited_menu.setEnabled(len(recent))
+        self.recently_visited_menu.setEnabled(bool(len(recent)))
 
     def get_wallet_folder(self):
         return self.gui_object.get_wallet_folder()
@@ -743,6 +733,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             icon = QIcon(":icons/cashacct-logo.png")
         tools_menu.addAction(icon, _("Lookup &Cash Account..."), self.lookup_cash_account_dialog, QKeySequence("Ctrl+L"))
         tools_menu.addAction(icon, _("&Register Cash Account..."), lambda: self.register_new_cash_account(addr='pick'), QKeySequence("Ctrl+G"))
+        icon = QIcon(":icons/lns.png")
+        tools_menu.addAction(icon, _("Lookup &LNS Name..."), self.lookup_lns_dialog, QKeySequence("Ctrl+Shift+L"))
         run_hook('init_menubar_tools', self, tools_menu)
 
         help_menu = menubar.addMenu(_("&Help"))
@@ -797,7 +789,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         QMessageBox.about(self, "Electron Cash",
             "<p><font size=+3><b>Electron Cash</b></font></p><p>" + _("Version") + f" {self.wallet.electrum_version}" + "</p>" +
             '<span style="font-size:11pt; font-weight:500;"><p>' +
-            _("Copyright © {year_start}-{year_end} Electron Cash LLC and the Electron Cash developers.").format(year_start=2017, year_end=2021) +
+            _("Copyright © {year_start}-{year_end} Electron Cash LLC and the Electron Cash developers.").format(year_start=2017, year_end=2022) +
             "</p><p>" + _("darkdetect for macOS © 2019 Alberto Sottile") + "</p>"
             "</span>" +
             '<span style="font-weight:200;"><p>' +
@@ -1608,6 +1600,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 "<li> Bitcoin Cash <b>Address</b> <b>★</b>"
                 "<li> Bitcoin Legacy <b>Address</b> <b>★</b>"
                 "<li> <b>Cash Account</b> <b>★</b> e.g. <i>satoshi#123</i>"
+                "<li> <b>LNS Name</b> <b>★</b> e.g. <i>satoshi.bch</i>"
                 "<li> <b>Contact name</b> <b>★</b> from the Contacts tab"
                 "<li> <b>OpenAlias</b> e.g. <i>satoshi@domain.com</i>"
                 "</ul><br>"
@@ -1688,9 +1681,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.max_button.setFixedWidth(140)
         self.max_button.setCheckable(True)
         grid.addWidget(self.max_button, 5, 3)
-        hbox = QHBoxLayout()
+        hbox = self.send_tab_extra_plugin_controls_hbox = QHBoxLayout()
         hbox.addStretch(1)
-        grid.addLayout(hbox, 5, 4)
+        grid.addLayout(hbox, 5, 4, 1, -1)
 
         msg = _('Bitcoin Cash transactions are in general not free. A transaction fee is paid by the sender of the funds.') + '\n\n'\
               + _('The amount of fee can be decided freely by the sender. However, transactions with low fees take more time to be processed.') + '\n\n'\
@@ -1996,13 +1989,23 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 self.print_error(label, "not found")
                 # could not get verified contact, don't offer it as a completion
                 return None
+        elif self.have_lns and _type.startswith('lns'):  # picks up lns and the lns_W pseudo-contacts
+            mod_type = 'lns'
+            info = self.wallet.lns.get_verified(label)
+            if info:
+                if _type == 'lns_W':
+                    mine_str = ' [' + _('Mine') + '] '
+            else:
+                self.print_error(label, "not found")
+                # could not get verified contact, don't offer it as a completion
+                return None
         elif _type == 'openalias':
             return contact.address
-        return label + emoji_str + '  ' + mine_str + '<' + contact.address + '>' if mod_type in ('address', 'cashacct') else None
+        return label + emoji_str + '  ' + mine_str + '<' + contact.address + '>' if mod_type in ('address', 'cashacct', 'lns') else None
 
     def update_completions(self):
         l = []
-        for contact in self.contact_list.get_full_contacts(include_pseudo=True):
+        for contact in self.contact_list.get_full_contacts():
             s = self.get_contact_payto(contact)
             if s is not None: l.append(s)
         l.sort(key=lambda x: x.lower())  # case-insensitive sort
@@ -2846,7 +2849,28 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         On failure throws up an error window and returns None.'''
         return cashacctqt.resolve_cashacct(self, name)
 
-    def set_contact(self, label, address, typ='address', replace=None) -> Contact:
+    def resolve_lns(self, name):
+        ''' Throws up a WaitingDialog while it resolves an LNS Name.
+
+        Goes out to network, verifies all tx's.
+
+        Returns: a tuple of: (Info, Minimally_Encoded_Formatted_AccountName)
+
+        Argument `name` should be a Cash Account name string of the form:
+
+          name#number.123
+          name#number
+          name#number.;  etc
+
+        If the result would be ambigious, that is considered an error, so enough
+        of the account name#number.collision_hash needs to be specified to
+        unambiguously resolve the Cash Account.
+
+        On failure throws up an error window and returns None.'''
+        assert lnsqt.available
+        return lnsqt.resolve_lns(self, name, wallet=self.wallet)
+
+    def set_contact(self, label, address, typ='address', replace=None, *, resolved=None) -> Optional[Contact]:
         ''' Returns a reference to the newly inserted Contact object.
         replace is optional and if specified, replace an existing contact,
         otherwise add a new one.
@@ -2855,14 +2879,27 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         that case the returned value would still be a valid Contact.
 
         Returns None on failure.'''
-        assert typ in ('address', 'cashacct')
+        assert typ in ('address', 'cashacct', 'lns')
         contact = None
         if typ == 'cashacct':
             tup = self.resolve_cashacct(label)  # this displays an error message for us
             if not tup:
-                self.contact_list.update() # Displays original
+                self.contact_list.update()  # Displays original
                 return
             info, label = tup
+            address = info.address.to_ui_string()
+            contact = Contact(name=label, address=address, type=typ)
+        elif typ == 'lns':
+            if not self.have_lns:
+                return  # Ignore LNS if LNS is not enabled
+            if resolved:
+                info = resolved
+            else:
+                tup = self.resolve_lns(label)  # this displays an error message for us
+                if not tup:
+                    self.contact_list.update()  # Displays original
+                    return
+                info, label = tup
             address = info.address.to_ui_string()
             contact = Contact(name=label, address=address, type=typ)
         elif not Address.is_valid(address):
@@ -2918,6 +2955,42 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.update_completions()
 
         run_hook('delete_contacts2', removed_entries)
+
+    def update_lns_contacts(self):
+        """Resolves the new addresses of lns contacts and updates them"""
+        if not self.network or not self.have_lns:
+            return  # Do nothing if in offline mode
+        contacts = self.contacts
+        lns_contacts = [contact for contact in contacts.get_all() if contact.type == 'lns']
+        lns_names = [contact.name for contact in lns_contacts]
+        if not lns_names:
+            return
+
+        def thread_func():
+            infos = self.wallet.lns.resolve_verify(lns_names)
+            if not infos:
+                return
+            updated = []
+            for contact in lns_contacts:
+                info = None
+                for ii in infos:
+                    try:
+                        if contact.name == ii.name and Address.from_string(contact.address) != ii.address:
+                            info = ii
+                            break
+                    except AddressError:
+                        pass
+                if info:
+                    updated.append((contact, Contact(info.name, info.address.to_ui_string(), 'lns')))
+            if updated:
+                def in_main_thread():
+                    for old, new in updated:
+                        contacts.replace(old, new)
+                    self.contact_list.do_update_signal.emit()
+                util.do_in_main_thread(in_main_thread)
+
+        t = threading.Thread(name=f"update_lns_contacts", target=thread_func, daemon=True)
+        t.start()
 
     def show_invoice(self, key):
         pr = self.invoices.get(key)
@@ -3166,6 +3239,18 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         blurb = "<br><br>" + _('Enter a string of the form <b>name#<i>number</i></b>')
         cashacctqt.lookup_cash_account_dialog(self, self.wallet, blurb=blurb,
                                               add_to_contacts_button = True, pay_to_button = True)
+
+    def lookup_lns_dialog(self):
+        if not self.have_lns:
+            msg = _("LNS subsystem is unavailable. This may be because the Python package <em>web3</em> "
+                    "is not installed.")
+            if sys.platform.lower() != "win32":
+                msg += "<br><br>" + _("You may try this from the command-line:")
+                msg += "<br><br><font face=\"monospace\">python3 -m pip install web3 --user</font>"
+            self.show_warning(msg=msg, rich_text=True, title=_("LNS Subsystem Unavailable"))
+            return
+        blurb = "<br><br>" + _('Enter a search term or a string of the form <b>satoshi.bch</b>')
+        lnsqt.lookup_lns_dialog(self, self.wallet, blurb=blurb, add_to_contacts_button=True, pay_to_button=True)
 
     def show_master_public_keys(self):
         dialog = WindowModalDialog(self.top_level_window(), _("Wallet Information"))
@@ -3926,7 +4011,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                                          decimal_point=self.decimal_point,
                                          fee_calc_timeout=timeout,
                                          download_inputs=download_inputs,
-                                         progress_callback=update_prog)
+                                         progress_callback=update_prog,
+                                         receives_before_sends=True)
         success = False
         def on_success(history):
             nonlocal success
@@ -4176,6 +4262,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 super().showEvent(e)
                 self.shown_signal.emit()
         self.need_restart = False
+        need_wallet_reopen = False
         dialog_finished = False
         d = SettingsModalDialog(self.top_level_window(), _('Preferences'))
         d.setObjectName('WindowModalDialog - Preferences')
@@ -4579,7 +4666,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 if self.wallet.use_change != usechange_result:
                     self.wallet.use_change = usechange_result
                     self.wallet.storage.put('use_change', self.wallet.use_change)
-                    multiple_cb.setEnabled(self.wallet.use_change)
+                    multiple_cb.setEnabled(bool(self.wallet.use_change))
             usechange_cb.stateChanged.connect(on_usechange)
         per_wallet_tx_widgets.append((usechange_cb, None))
 
@@ -4591,9 +4678,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             if isinstance(self.force_use_single_change_addr, str):
                 multiple_cb.setToolTip(self.force_use_single_change_addr)
             else:
-                multuple_cb.setToolTip('')
+                multiple_cb.setToolTip('')
         else:
-            multiple_cb.setEnabled(self.wallet.use_change)
+            multiple_cb.setEnabled(bool(self.wallet.use_change))
             multiple_cb.setToolTip('\n'.join([
                 _('In some cases, use up to 3 change addresses in order to break '
                   'up large coin amounts and obfuscate the recipient address.'),
@@ -4644,7 +4731,6 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         legacy_p2sh_cb.stateChanged.connect(on_legacy_p2sh_cb)
         global_tx_widgets.append((legacy_p2sh_cb, None))
 
-
         # Schnorr
         use_schnorr_cb = QCheckBox(_("Sign with Schnorr signatures"))
         use_schnorr_cb.setChecked(self.wallet.is_schnorr_enabled())
@@ -4658,6 +4744,56 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             use_schnorr_cb.setEnabled(False)
             use_schnorr_cb.setToolTip(no_schnorr_reason[0])
         per_wallet_tx_widgets.append((use_schnorr_cb, None))
+
+        # Retire old change addresses
+        limit_change_w = QWidget()
+        vb = QVBoxLayout(limit_change_w)
+        vb.setContentsMargins(0, 0, 0, 0)
+        limit_change_chk = QCheckBox(_("Retire unnused change addresses"))
+        limit_change_chk.setChecked(self.wallet.limit_change_addr_subs > 0)
+        vb.addWidget(limit_change_chk)
+        limit_change_inner_w = QWidget()
+        hb = QHBoxLayout(limit_change_inner_w)
+        hb.addSpacing(24)
+        hb.setContentsMargins(0, 0, 0, 0)
+        limit_change_sb = QSpinBox()
+        limit_change_sb.setMinimum(0)
+        limit_change_sb.setMaximum(2**31 - 1)
+        limit_change_sb.setValue(self.wallet.limit_change_addr_subs or self.wallet.DEFAULT_CHANGE_ADDR_SUBS_LIMIT)
+        l1 = QLabel(_("Retire if older than:"))
+        f = l1.font()
+        f.setPointSize(f.pointSize() - 1)
+        l1.setFont(f)
+        hb.addWidget(l1)
+        hb.addWidget(limit_change_sb)
+        l2 = QLabel(_("from latest index"))
+        l2.setFont(f)
+        hb.addWidget(l2)
+        limit_change_sb.setFont(f)
+        orig_limit_change_subs = self.wallet.limit_change_addr_subs
+        def limit_change_subs_changed():
+            nonlocal need_wallet_reopen
+            limit_change_inner_w.setEnabled(limit_change_chk.isChecked())
+            self.wallet.limit_change_addr_subs = limit_change_sb.value() if limit_change_chk.isChecked() else 0
+            if self.wallet.limit_change_addr_subs != orig_limit_change_subs:
+                need_wallet_reopen = True
+                if self.wallet.synchronizer:
+                    self.wallet.synchronizer.clear_retired_change_addrs()
+        limit_change_inner_w.setEnabled(limit_change_chk.isChecked())
+        limit_change_sb.valueChanged.connect(limit_change_subs_changed)
+        limit_change_chk.stateChanged.connect(limit_change_subs_changed)
+        vb.addWidget(limit_change_inner_w)
+        vb.addStretch(1)
+        limit_change_w.setToolTip("<p>" + _("If checked, change addresses with no balance and trivial history which are"
+                                            " sufficeintly old will not be subscribed-to on the server, in order"
+                                            " to save resources.") + "</p>" +
+                                  "<p>" + _("Disable this option if you plan on receiving funds using your old change"
+                                            " addresses or if you suspect your old change addresses"
+                                            " may have unseen funds on them.") + "</p>")
+        limit_change_inner_w.setToolTip("<p>" + _("Specify how old a change address must be in order to be considered"
+                                                  " for retirement. This value is in terms of address index position"
+                                                  " from the most recent change address.") + "</o>")
+        per_wallet_tx_widgets.append((limit_change_w, None))
 
         # Fiat Tab (only build it if not on testnet)
         #
@@ -4755,7 +4891,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             fiat_widgets.append((fiat_address_checkbox, None))
 
         else:
-            # For testnet(s) and for --taxcoin we do not support Fiat display
+            # For testnet(s) where we do not support Fiat display
             lbl = QLabel(_("Fiat display is not supported on this chain."))
             lbl.setAlignment(Qt.AlignHCenter|Qt.AlignVCenter)
             f = lbl.font()
@@ -4828,6 +4964,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         run_hook('close_settings_dialog')
         if self.need_restart:
             self.show_message(_('Please restart Electron Cash to activate the new GUI settings'), title=_('Success'))
+        elif need_wallet_reopen:
+            self.show_message(_('Please close and reopen this wallet to activate the new settings'), title=_('Success'))
 
     def closeEvent(self, event):
         # It seems in some rare cases this closeEvent() is called twice.
@@ -5026,10 +5164,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 cb = QCheckBox(descr['fullname'])
                 weakCb = Weak.ref(cb)
                 plugin_is_loaded = p is not None
-                cb_enabled = (not plugin_is_loaded and plugins.is_internal_plugin_available(name, self.wallet)
-                              or plugin_is_loaded and p.can_user_disable())
+                cb_enabled = bool(not plugin_is_loaded and plugins.is_internal_plugin_available(name, self.wallet)
+                                  or plugin_is_loaded and p.can_user_disable())
                 cb.setEnabled(cb_enabled)
-                cb.setChecked(plugin_is_loaded and p.is_enabled())
+                cb.setChecked(bool(plugin_is_loaded and p.is_enabled()))
                 grid.addWidget(cb, i, 0)
                 enable_settings_widget(p, name, i)
                 cb.clicked.connect(partial(do_toggle, weakCb, name, i))
@@ -5477,6 +5615,3 @@ class TxUpdateMgr(QObject, PrintError):
                                           .format(n_cashacct, ca_text))
                         else:
                             parent.notify(_("New transaction: {}").format(ca_text))
-                    # Play the sound effect ('ard moné edition only)
-                    if parent.tx_sound:
-                        parent.tx_sound.play()

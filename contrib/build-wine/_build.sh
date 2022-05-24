@@ -59,19 +59,8 @@ prepare_wine() {
         PYINSTALLER_COMMIT=d6f3d02365ba68ffc84169c56c292701f346110e # Version 4.2 + a patch to drop an unused .rc file
 
         ## These settings probably don't need change
-        export WINEPREFIX=$HOME/wine64
-        #export WINEARCH='win32'
-        export WINEDEBUG=-all
-
         PYHOME=c:/python$PYTHON_VERSION  # NB: PYTON_VERSION comes from ../base.sh
         PYTHON="wine $PYHOME/python.exe -OO -B"
-
-        # Clean up Wine environment. Breaks docker so leave this commented-out.
-        #echo "Cleaning $WINEPREFIX"
-        #rm -rf $WINEPREFIX
-        #echo "done"
-
-        wine 'wineboot'
 
         info "Cleaning tmp"
         rm -rf $HOME/tmp
@@ -115,11 +104,17 @@ EOF
             wine msiexec /i "${msifile}.msi" /qn TARGETDIR=$PYHOME || fail "Failed to install Python component: ${msifile}"
         done
 
-        # The below requirements-build-wine.txt uses hashed packages that we
+        # The below requirement files use hashed packages that we
         # need for pyinstaller and other parts of the build.  Using a hashed
         # requirements file hardens the build against dependency attacks.
+        info "Installing pip from requirements-pip.txt ..."
+        $PYTHON -m pip install --no-deps --no-warn-script-location -r $here/../deterministic-build/requirements-pip.txt || fail "Failed to install pip"
         info "Installing build requirements from requirements-build-wine.txt ..."
         $PYTHON -m pip install --no-deps --no-warn-script-location -r $here/../deterministic-build/requirements-build-wine.txt || fail "Failed to install build requirements"
+
+        info "Patching pip vendored distlib to produce deterministic zip archives ..."
+        sed -i -e 's/\('\''__main__\.py'\''\)/ZipInfo(\1)/g' -e 's/\(from .compat import .*\)/from zipfile import ZipInfo\n\1/g' \
+            "$WINEPREFIX"/drive_c/python$PYTHON_VERSION/Lib/site-packages/pip/_vendor/distlib/scripts.py
 
         info "Compiling PyInstaller bootloader with AntiVirus False-Positive Protection™ ..."
         mkdir pyinstaller
@@ -145,6 +140,7 @@ EOF
             # If we switch to 64-bit, edit this path below.
             popd
             [ -e PyInstaller/bootloader/Windows-32bit/runw.exe ] || fail "Could not find runw.exe in target dir!"
+            rm -fv pyinstaller.py  # workaround for https://github.com/pyinstaller/pyinstaller/pull/6701
         ) || fail "PyInstaller bootloader build failed"
         info "Installing PyInstaller ..."
         $PYTHON -m pip install --no-deps --no-warn-script-location ./pyinstaller || fail "PyInstaller install failed"
@@ -180,10 +176,10 @@ EOF
         ) || fail "libusb build failed"
 
         # libsecp256k1, libzbar & libusb
-        mkdir -p $WINEPREFIX/drive_c/tmp
-        cp "$here"/../../electroncash/*.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libraries to their destination"
-        cp libusb/libusb/.libs/libusb-1.0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libusb to its destination"
-        cp "$here"/../../electroncash/tor/bin/tor.exe $WINEPREFIX/drive_c/tmp/ || fail "Could not copy tor.exe to its destination"
+        mkdir -p "$WINEPREFIX"/drive_c/tmp
+        cp "$here"/../../electroncash/*.dll "$WINEPREFIX"/drive_c/tmp/ || fail "Could not copy libraries to their destination"
+        cp libusb/libusb/.libs/libusb-1.0.dll "$WINEPREFIX"/drive_c/tmp/ || fail "Could not copy libusb to its destination"
+        cp "$here"/../../electroncash/tor/bin/tor.exe "$WINEPREFIX"/drive_c/tmp/ || fail "Could not copy tor.exe to its destination"
 
         popd  # out of homedir/tmp
         popd  # out of $here
@@ -203,8 +199,6 @@ build_the_app() {
 
         NAME_ROOT=$PACKAGE  # PACKAGE comes from ../base.sh
         # These settings probably don't need any change
-        export WINEPREFIX=$HOME/wine64
-        export WINEDEBUG=-all
         export PYTHONDONTWRITEBYTECODE=1
 
         PYHOME=c:/python$PYTHON_VERSION
@@ -227,14 +221,15 @@ build_the_app() {
         find -exec touch -d '2000-11-11T11:11:11+00:00' {} +
         popd  # go back to $here
 
-        cp -r "$here"/../electrum-locale/locale $WINEPREFIX/drive_c/electroncash/electroncash/
+        cp -r "$here"/../electrum-locale/locale "$WINEPREFIX"/drive_c/electroncash/electroncash/
 
         # Install frozen dependencies
         info "Installing frozen dependencies ..."
         $PYTHON -m pip install --no-deps --no-warn-script-location -r "$here"/../deterministic-build/requirements.txt || fail "Failed to install requirements"
         $PYTHON -m pip install --no-deps --no-warn-script-location -r "$here"/../deterministic-build/requirements-hw.txt || fail "Failed to install requirements-hw"
+        $PYTHON -m pip install --no-deps --no-warn-script-location -r "$here"/../deterministic-build/requirements-web3.txt || fail "Failed to install requirements-web3"
 
-        pushd $WINEPREFIX/drive_c/electroncash
+        pushd "$WINEPREFIX"/drive_c/electroncash
         $PYTHON setup.py install || fail "Failed setup.py install"
         popd
 
@@ -242,7 +237,7 @@ build_the_app() {
 
         info "Resetting modification time in C:\Python..."
         # (Because we just installed a bunch of stuff)
-        pushd $HOME/wine64/drive_c/python$PYTHON_VERSION
+        pushd "$WINEPREFIX"/drive_c/python$PYTHON_VERSION
         find -exec touch -d '2000-11-11T11:11:11+00:00' {} +
         ls -l
         popd
@@ -266,7 +261,7 @@ build_the_app() {
         # build NSIS installer
         info "Running makensis to build setup .exe version ..."
         # $VERSION could be passed to the electron-cash.nsi script, but this would require some rewriting in the script iself.
-        wine "$WINEPREFIX/drive_c/Program Files (x86)/NSIS/makensis.exe" /DPRODUCT_VERSION=$VERSION electron-cash.nsi || fail "makensis failed"
+        wine "$WINEPREFIX/drive_c/Program Files/NSIS/makensis.exe" /DPRODUCT_VERSION=$VERSION electron-cash.nsi || fail "makensis failed"
 
         cd dist
         mv $NAME_ROOT-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory"
