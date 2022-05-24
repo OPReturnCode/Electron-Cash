@@ -557,9 +557,6 @@ class Commands:
     @command('w')
     def rpa_generate_transaction_from_paycode(self, amount, paycode):
         # WARNING: Amount is in full Bitcoin Cash units
-        if self.wallet.wallet_type != 'rpa':
-            return {'error': 'This command may only be used on an RPA wallet.'}
-
         return rpa.paycode.generate_transaction_from_paycode(self.wallet, self.config, amount, paycode)
 
     @command('wp')
