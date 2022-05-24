@@ -21,6 +21,7 @@ from ..plugins import run_hook
 from ..transaction import Transaction, OPReturn
 from ..keystore import KeyStore
 from ..util import print_msg
+from .. import networks
 
 
 def _satoshis(amount):
@@ -178,7 +179,7 @@ def generate_paycode(wallet, prefix_size="10"):
     payloadbytes = bytes.fromhex(payloadstring)
 
     # Generate paycode "address" via rpa.addr function
-    prefix = "paycode"
+    prefix = networks.net.RPA_PREFIX
     return addr.encode_full(prefix, addr.PUBKEY_TYPE, payloadbytes)
 
 
