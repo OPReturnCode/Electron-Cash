@@ -2028,12 +2028,21 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
 
         # This is a wrapper function around the call the generate the rpa transaction.  We can pass this function to the waiting dialog.
         def rpa_grind():
-            def update_prog_grinding(x):
-                if dlg: dlg.update_progress(int(x))
-            self.raw_tx = rpa.paycode.generate_transaction_from_paycode(self.wallet, self.config, full_unit_amount, paycode_string,password=rpa_pwd,progress_callback = update_prog_grinding)
-            return 
+            exit_event = threading.Event()
 
-        isInvoice= False;
+            def update_prog_grinding(x):
+                if dlg:
+                    dlg.update_progress(int(x))
+                    if dlg.isHidden():
+                        exit_event.set()
+            self.raw_tx = rpa.paycode.generate_transaction_from_paycode(
+                self.wallet, self.config, full_unit_amount, paycode_string,
+                password=rpa_pwd, progress_callback=update_prog_grinding,
+                exit_event=exit_event
+            )
+            return
+
+        isInvoice= False
 
         if self.payment_request and self.payment_request.has_expired():
             self.show_error(_('Payment request has expired'))
