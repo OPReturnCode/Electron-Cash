@@ -82,7 +82,11 @@ class Rpa_manager(ThreadJob):
            return
             
         # Define height variables.     
-        server_height = self.network.get_server_height() 
+        server_height = self.network.get_server_height()
+
+        if not server_height:
+            return
+
         rpa_height = self.wallet.storage.get('rpa_height')
         if rpa_height is None:
             rpa_height = server_height - 100
