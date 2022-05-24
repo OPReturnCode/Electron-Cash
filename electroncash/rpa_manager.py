@@ -103,7 +103,7 @@ class Rpa_manager(ThreadJob):
             
             # Define the "grind string" (the RPA prefix)
             rpa_grind_string = self.wallet.get_grind_string()
-            params = [rpa_height, number_of_blocks, rpa_grind_string]
+            params = [rpa_height, number_of_blocks + 1, rpa_grind_string]
             requests = []
             
             # self.block_requests is used to ensure only 1 call is made at any given height.  
