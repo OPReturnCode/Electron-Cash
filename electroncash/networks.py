@@ -101,6 +101,7 @@ class TestNet(AbstractNet):
     ADDRTYPE_P2SH = 196
     ADDRTYPE_P2SH_BITPAY = 196  # Unsure
     CASHADDR_PREFIX = "bchtest"
+    RPA_PREFIX = "paycodetest"
     HEADERS_URL = "http://bitcoincash.com/files/testnet_headers"  # Unused
     GENESIS = "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943"
     DEFAULT_PORTS = {'t':'51001', 's':'51002'}

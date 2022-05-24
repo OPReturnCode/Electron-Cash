@@ -2592,15 +2592,15 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             
         # Ensure the checksum for the RPA address is correct.            
         paycode_checksum_ok = True
-        if scheme == "paycode" and not self.wallet.is_multisig():
+        if scheme == networks.net.RPA_PREFIX and not self.wallet.is_multisig():
             try:
-                rpa.addr.decode("paycode:"+address)
+                rpa.addr.decode(networks.net.RPA_PREFIX + ":" + address)
             except:
                 paycode_checksum_ok = False
      
         if scheme == "paycode" and paycode_checksum_ok and not self.wallet.is_multisig():
             self.payto_e.setIsPaycode(True)
-            self.payto_e.setText("<paycode:" + address + ">")
+            self.payto_e.setText("<" + networks.net.RPA_PREFIX + ":" + address + ">")
             self.payto_e.setGreen()
             self.payto_e.setReadOnly(True)
         else:
