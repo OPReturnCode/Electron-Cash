@@ -189,7 +189,7 @@ class Rpa_manager(ThreadJob):
             tx_height = rawtx_tuple[1]
             extracted_private_key = 0
             
-            if rawtx is not "lastblock":
+            if rawtx != "lastblock":
                 password = self.wallet.rpa_pwd
                 # This will be assigned to zero if the private key cannot be extracted (most tx)
                 extracted_private_keys = self.wallet.extract_private_keys_from_transaction(rawtx, password)  

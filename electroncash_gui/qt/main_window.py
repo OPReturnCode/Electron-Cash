@@ -1324,7 +1324,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.expires_combo.setEnabled(False)
 
         # The QR code for the receive tab.
-        if self.wallet.wallet_type is not 'rpa':
+        if self.wallet.wallet_type != 'rpa':
             # Do not attempt to show a QR code for RPA paycode wallets.  There is no URI scheme yet for RPA.
             vbox2 = QVBoxLayout()
             vbox2.setContentsMargins(0, 0, 0, 0)
@@ -2084,7 +2084,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             dlg = WaitingDialog(self, _('Please allow a few moments while Electron Cash creates your RPA transaction.  It needs to grind through many transaction signatures.'), rpa_grind, None,None, progress_bar=True, progress_min=0, progress_max=100)
             val=dlg.exec_()
             # If the user closes the waiting dialog, we should just exit.
-            while self.raw_tx == None:
+            if self.raw_tx == None:
                 return
                 
             raw_tx = self.raw_tx
