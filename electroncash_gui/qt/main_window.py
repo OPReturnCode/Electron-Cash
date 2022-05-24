@@ -237,7 +237,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.network_signal.connect(self.on_network_qt)
             interests = ['blockchain_updated', 'wallet_updated',  
                          'new_transaction', 'status', 'banner', 'verified2',
-                         'fee', 'ca_verified_tx', 'ca_verification_failed']
+                         'fee', 'ca_verified_tx', 'ca_verification_failed', 'features']
             # To avoid leaking references to "self" that prevent the
             # window from being GC-ed when closed, callbacks should be
             # methods of this class only, and specifically not be
@@ -249,6 +249,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.network.register_callback(self.on_history, ['on_history'])
             self.new_fx_quotes_signal.connect(self.on_fx_quotes)
             self.new_fx_history_signal.connect(self.on_fx_history)
+            
+            if self.network.is_connected():
+                self.check_necessary_server_features()
 
         gui_object.timer.timeout.connect(self.timer_actions)
         self.fetch_alias()
@@ -407,6 +410,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         elif event in ('ca_verified_tx', 'ca_verification_failed'):
             if args[0] is self.wallet.cashacct:
                 self.network_signal.emit(event, args)
+        elif event == 'features':
+            self.network_signal.emit(event, args)
         else:
             self.print_error("unexpected network message:", event, args)
 
@@ -425,6 +430,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             pass
         elif event == 'verified2':
             pass
+        elif event == 'features':
+            self.check_necessary_server_features()
         else:
             self.print_error("unexpected network_qt signal:", event, args)
 
@@ -1035,6 +1042,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.update_status()
         if self.wallet.up_to_date or not self.network or not self.network.is_connected():
             self.update_tabs()
+
+    def check_necessary_server_features(self):
+        if self.wallet.wallet_type == 'rpa' and 'rpa' not in self.network.features:
+            self.show_warning("The connected server does not support reusable addresses. Please connect to an RPA server.")
 
     @rate_limited(1.0, classlevel=True, ts_after=True) # Limit tab updates to no more than 1 per second, app-wide. Multiple calls across instances will be collated into 1 deferred series of calls (1 call per extant instance)
     def update_tabs(self):

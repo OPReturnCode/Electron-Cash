@@ -275,6 +275,7 @@ class Network(util.DaemonThread):
 
         self.banner = ''
         self.donation_address = ''
+        self.features = None
         self.relay_fee = None
         # callbacks passed with subscriptions
         self.subscriptions = defaultdict(list)
@@ -495,6 +496,7 @@ class Network(util.DaemonThread):
             assert message_id is not None
         self.queue_request('server.banner', [])
         self.queue_request('server.donation_address', [])
+        self.queue_request('server.features', [])
         self.queue_request('server.peers.subscribe', [])
         #self.request_fee_estimates()  # We disable fee estimates globally in this app for now. BCH doesn't need them and they create more user confusion than anything.
         self.queue_request('blockchain.relayfee', [])
@@ -548,6 +550,8 @@ class Network(util.DaemonThread):
             value = self.get_interfaces()
         elif key == 'proxy':
             value = (self.proxy and self.proxy.copy()) or None
+        elif key =='features':
+            value = self.features
         else:
             raise RuntimeError('unexpected trigger key {}'.format(key))
         return value
@@ -825,6 +829,10 @@ class Network(util.DaemonThread):
         elif method == 'server.donation_address':
             if error is None and isinstance(result, str):
                 self.donation_address = result
+        elif method == 'server.features':
+            if error is None and isinstance(result, dict):
+                self.features = result
+                self.notify('features')
         elif method == 'blockchain.estimatefee':
             try:
                 if error is None and isinstance(result, (int, float)) and result > 0:
