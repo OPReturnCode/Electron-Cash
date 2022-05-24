@@ -185,7 +185,7 @@ def generate_paycode(wallet, prefix_size="10"):
 
 def generate_transaction_from_paycode(wallet, config, amount, rpa_paycode=None, fee=None, from_addr=None,
                                       change_addr=None, nocheck=False, unsigned=False, password=None, locktime=None,
-                                      op_return=None, op_return_raw=None, progress_callback=None):
+                                      op_return=None, op_return_raw=None, progress_callback=None, exit_event=None):
     if not wallet.is_schnorr_enabled():
         print_msg(
             "You must enable schnorr signing on this wallet for RPA.  Exiting.")
@@ -305,6 +305,10 @@ def generate_transaction_from_paycode(wallet, config, amount, rpa_paycode=None, 
         progress_callback(progress_count)
 
     while not tx_matches_paycode_prefix:
+        if exit_event:
+            if exit_event.is_set():
+                break
+
         grind_nonce_string = str(grind_count)
         grinding_message = paycode_hex + grind_nonce_string + grinding_version
         ndata = sha256(grinding_message)
