@@ -299,15 +299,22 @@ def generate_transaction_from_paycode(wallet, config, amount, rpa_paycode=None, 
     # While loop for grinding.  Keep grinding until txid prefix matches
     # paycode scanpubkey prefix.
     grind_count = 0
+    progress_count = 0
+
+    if progress_callback:
+        progress_callback(progress_count)
+
     while not tx_matches_paycode_prefix:
         grind_nonce_string = str(grind_count)
         grinding_message = paycode_hex + grind_nonce_string + grinding_version
         ndata = sha256(grinding_message)
         # Re-sign the transaction input.
         tx._sign_txin(0, 0, sec, compressed, use_cache=False, ndata=ndata)
-        progress_count = grind_count // 1000
-        if progress_callback:
-                progress_callback(progress_count)
+
+        if progress_callback and progress_count < grind_count // 1000:
+            progress_count = grind_count // 1000
+            progress_callback(progress_count)
+
         input_zero = tx._inputs[0]
         my_serialized_input = tx.serialize_input(input_zero, tx.input_script(input_zero, False, tx._sign_schnorr))
         my_serialized_input_bytes = bytes.fromhex(my_serialized_input)
