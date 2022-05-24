@@ -125,7 +125,7 @@ class Software_KeyStore(KeyStore):
                 tx.sign(keypairs, use_cache=use_cache, ndata=ndata)
             else:
                 # Regular transaction sign (no ndata supported or no ndata specified)
-                tx.sign(keypairs, use_cache=use_cache,ndata=ndata)
+                tx.sign(keypairs, use_cache=use_cache)
 
 
 class Imported_KeyStore(Software_KeyStore):
