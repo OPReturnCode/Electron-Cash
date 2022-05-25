@@ -227,6 +227,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.payment_request_ok_signal.connect(self.payment_request_ok)
         self.payment_request_error_signal.connect(self.payment_request_error)
         self.gui_object.update_available_signal.connect(self.on_update_available)  # shows/hides the update_available_button, emitted by update check mechanism when a new version is available
+        self.gui_object.new_window_initialized_signal.connect(self.new_window_initialized)
         self.history_list.setFocus(True)
 
         # update fee slider in case we missed the callback
@@ -255,6 +256,20 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
 
         gui_object.timer.timeout.connect(self.timer_actions)
         self.fetch_alias()
+
+    def new_window_initialized(self):
+        if self.wallet.wallet_type == "rpa" and not self.wallet.rpa_pwd and self.wallet.has_password():
+            while not self.wallet.rpa_pwd:
+                password = self.password_dialog("To perform RPA syncing in the background, please enter your password.")
+                try:
+                    self.wallet.check_password(password)
+                    self.wallet.rpa_pwd = password
+                except Exception as e:
+                    self.show_error(str(e))
+                    self.clean_up()
+                    self.close()
+                    break
+
 
     def setup_tx_rcv_sound(self):
         """Used only in the 'ard moné edition"""
@@ -482,17 +497,6 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.watching_only_changed()
         self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
         run_hook('load_wallet', self.wallet, self)
-        if self.wallet.wallet_type == "rpa":
-            if self.wallet.has_password():
-                password = self.password_dialog("To perform RPA syncing in the background, please enter your password.")
-                self.wallet.rpa_pwd = password
-                try:
-                    self.wallet.check_password(password)
-                except Exception as e:
-                    self.show_error(str(e))
-                    # This is not the precise way to shut down the client, as we can see
-                    # errors in the terminal.  Needs cleanup.
-                    self.gui_object.close_window(self)
 
     def init_geometry(self):
         winpos = self.wallet.storage.get("winpos-qt")
