@@ -1,6 +1,9 @@
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 Thomas Voegtlin
 #
+# Electron Cash - Bitcoin Cash thin client
+# Copyright (C) 2017-2022 The Electron Cash Developers
+#
 # Permission is hereby granted, free of charge, to any person
 # obtaining a copy of this software and associated documentation files
 # (the "Software"), to deal in the Software without restriction,
@@ -40,7 +43,7 @@ import time
 from collections import defaultdict, namedtuple
 from enum import Enum, auto
 from functools import partial
-from typing import Set, Tuple, Union
+from typing import ItemsView, List, Optional, Set, Tuple, Union, ValuesView
 
 from .i18n import ngettext
 from .util import (NotEnoughFunds, ExcessiveFee, PrintError, UserCancelled, profiler, format_satoshis, format_time,
@@ -68,9 +71,10 @@ from .blockchain import NULL_HASH_HEX
 
 
 from . import paymentrequest
-from .paymentrequest import InvoiceStore, PR_PAID, PR_UNPAID, PR_UNKNOWN, PR_EXPIRED
+from .paymentrequest import InvoiceStore, PR_PAID, PR_UNCONFIRMED, PR_UNPAID, PR_UNKNOWN, PR_EXPIRED
 from .contacts import Contacts
 from . import cashacct
+from . import lns
 from . import slp
 from .rpa import paycode as rpa
 
@@ -189,17 +193,23 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         self.thread = None  # this is used by the qt main_window to store a QThread. We just make sure it's always defined as an attribute here.
         self.network = None
         # verifier (SPV) and synchronizer are started in start_threads
-        self.synchronizer = None
-        self.verifier = None
+        self.verifier: Optional[SPV] = None
+        self.synchronizer: Optional[Synchronizer] = None
         self.rpa_manager = None
         self.weak_window = None  # Some of the GUI classes, such as the Qt ElectrumWindow, use this to refer back to themselves.  This should always be a weakref.ref (Weak.ref), or None
         # CashAccounts subsystem. Its network-dependent layer is started in
         # start_threads. Note: object instantiation should be lightweight here.
         # self.cashacct.load() is called later in this function to load data.
         self.cashacct = cashacct.CashAcct(self)
+        if lns.available:
+            self.lns = lns.LNS(self)
+        else:
+            self.lns = None
         self.slp = slp.WalletData(self)
         finalization_print_error(self.cashacct)  # debug object lifecycle
         finalization_print_error(self.slp)  # debug object lifecycle
+        if self.lns:
+            finalization_print_error(self.lns)  # debug object lifecycle
 
         # Removes defunct entries from self.pruned_txo asynchronously
         self.pruned_txo_cleaner_thread = None
@@ -283,6 +293,8 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         # data here, before the below calls happen
         self.cashacct.load()
         self.slp.load()  # try to load first so we can pick up the remove_transaction hook from load_transactions if need be
+        if self.lns:
+            self.lns.load()
 
         # Now, finally, after object is constructed -- we can do this
         self.load_keystore_wrapper()
@@ -665,6 +677,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             height, conf, timestamp = self.get_tx_height(tx_hash)
             self.cashacct.add_verified_tx_hook(tx_hash, info, header)
         self.network.trigger_callback('verified2', self, tx_hash, height, conf, timestamp)
+        self._update_request_statuses_touched_by_tx(tx_hash)
 
     def verification_failed(self, tx_hash, reason):
         ''' TODO: Notify gui of this if it keeps happening, try a different
@@ -697,6 +710,8 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             if txs: self.cashacct.undo_verifications_hook(txs)
         if txs:
             self._addr_bal_cache = {}  # this is probably not necessary -- as the receive_history_callback will invalidate bad cache items -- but just to be paranoid we clear the whole balance cache on reorg anyway as a safety measure
+        for tx_hash in txs:
+            self._update_request_statuses_touched_by_tx(tx_hash)
         return txs
 
     def get_local_height(self):
@@ -1457,10 +1472,15 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             # inform slp subsystem as well
             self.slp.rm_tx(tx_hash)
 
-
     def receive_tx_callback(self, tx_hash, tx, tx_height):
         self.add_transaction(tx_hash, tx)
         self.add_unverified_tx(tx_hash, tx_height)
+        self._update_request_statuses_touched_by_tx(tx_hash)
+
+    def _update_request_statuses_touched_by_tx(self, tx_hash):
+        tx = self.transactions.get(tx_hash)
+        if tx is None:
+            return
         if self.network and self.network.callback_listener_count("payment_received") > 0:
             for _, addr, _ in tx.outputs():
                 status = self.get_request_status(addr)  # returns PR_UNKNOWN quickly if addr has no requests, otherwise returns tuple
@@ -1515,7 +1535,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
 
     TxHistory = namedtuple("TxHistory", "tx_hash, height, conf, timestamp, amount, balance")
 
-    def get_history(self, domain=None, *, reverse=False):
+    def get_history(self, domain=None, *, reverse=False, receives_before_sends=False) -> List[TxHistory]:
         # get domain
         if domain is None:
             domain = self.get_addresses()
@@ -1537,7 +1557,19 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             delta = tx_deltas[tx_hash]
             height, conf, timestamp = self.get_tx_height(tx_hash)
             history.append((tx_hash, height, conf, timestamp, delta))
-        history.sort(key = lambda x: self.get_txpos(x[0]), reverse=True)
+
+        def sort_func_simple(h_item):
+            """Here we naively sort just by tx_pos in the block (CTOR ordering), per block"""
+            return self.get_txpos(h_item[0])
+
+        def sort_func_receives_before_sends(h_item):
+            """Here we sort in a way such that receives are always ordered before sends, per block"""
+            height, pos = self.get_txpos(h_item[0])
+            delta = h_item[4] or 0  # Guard against delta == None by forcing None -> 0
+            return height, -delta, pos
+
+        sort_func = sort_func_receives_before_sends if receives_before_sends else sort_func_simple
+        history.sort(key=sort_func, reverse=True)
 
         # 3. add balance
         c, u, x = self.get_balance(domain)
@@ -1557,7 +1589,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
     def export_history(self, domain=None, from_timestamp=None, to_timestamp=None, fx=None,
                        show_addresses=False, decimal_point=8,
                        *, fee_calc_timeout=10.0, download_inputs=False,
-                       progress_callback=None):
+                       progress_callback=None, receives_before_sends=False):
         ''' Export history. Used by RPC & GUI.
 
         Arg notes:
@@ -1654,7 +1686,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
                                    is_diff=is_diff)
 
         # grab history
-        h = self.get_history(domain, reverse=True)
+        h = self.get_history(domain, reverse=True, receives_before_sends=receives_before_sends)
         out = []
 
         n, l = 0, max(1, float(len(h)))
@@ -1903,6 +1935,8 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         # Fee estimator
         if fixed_fee is None:
             fee_estimator = config.estimate_fee
+        elif callable(fixed_fee):
+            fee_estimator = fixed_fee
         else:
             fee_estimator = lambda size: fixed_fee
 
@@ -2137,6 +2171,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             # thread-safe fashion from within the thread where they normally
             # operate on their data structures.
             self.cashacct.stop()
+            self.synchronizer.save()
             self.synchronizer.release()
             self.verifier.release()
             self.synchronizer = None
@@ -2358,7 +2393,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             info = self.verified_tx.get(txid)
             if info:
                 tx_height, timestamp, pos = info
-                conf = local_height - tx_height
+                conf = max(local_height - tx_height + 1, 0)
             else:
                 conf = 0
             l.append((conf, v))
@@ -2430,7 +2465,12 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         conf = None
         if amount:
             paid, conf = self.get_payment_status(address, amount)
-            status = PR_PAID if paid else PR_UNPAID
+            if not paid:
+                status = PR_UNPAID
+            elif conf == 0:
+                status = PR_UNCONFIRMED
+            else:
+                status = PR_PAID
             if status == PR_UNPAID and expiration is not None and time.time() > timestamp + expiration:
                 status = PR_EXPIRED
         else:
@@ -2581,14 +2621,16 @@ class Abstract_Wallet(PrintError, SPVDelegate):
     def is_hardware(self):
         return any([isinstance(k, Hardware_KeyStore) for k in self.get_keystores()])
 
-    def add_address(self, address):
+    def add_address(self, address, *, for_change=False):
         assert isinstance(address, Address)
-        self._addr_bal_cache.pop(address, None)  # paranoia, not really necessary -- just want to maintain the invariant that when we modify address history below we invalidate cache.
+        # paranoia, not really necessary -- just want to maintain the invariant that when we modify address history
+        # below we invalidate cache.
+        self._addr_bal_cache.pop(address, None)
         self.invalidate_address_set_cache()
         if address not in self._history:
             self._history[address] = []
         if self.synchronizer:
-            self.synchronizer.add(address)
+            self.synchronizer.add(address, for_change=for_change)
         self.cashacct.on_address_addition(address)
 
     def has_password(self):
@@ -2615,6 +2657,7 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         if not self.synchronizer or not self.verifier:
             raise RuntimeError('Refusing to rebuild a stopped wallet!')
         network = self.network
+        self.synchronizer.clear_retired_change_addrs()
         self.stop_threads()
         do_addr_save = False
         with self.lock:
@@ -2692,6 +2735,37 @@ class Abstract_Wallet(PrintError, SPVDelegate):
         # Note: we will have '1' at some point in the future which will mean:
         # 'ask me per tx', so for now True -> 2.
         self.storage.put('sign_schnorr', 2 if b else 0)
+
+    def get_history_values(self) -> ValuesView[Tuple[str, int]]:
+        """ Returns the an iterable (view) of all the List[tx_hash, height] pairs for each address in the wallet."""
+        return self._history.values()
+
+    def get_history_items(self) -> ItemsView[Address, List[Tuple[str, int]]]:
+        return self._history.items()
+
+    DEFAULT_CHANGE_ADDR_SUBS_LIMIT = 1000
+
+    @property
+    def limit_change_addr_subs(self) -> int:
+        """Returns positive nonzero if old change subs limiting is set in wallet storage, otherwise returns 0"""
+        val = int(self.storage.get('limit_change_addr_subs', self.DEFAULT_CHANGE_ADDR_SUBS_LIMIT))
+        if val >= 0:
+            return val
+        return self.DEFAULT_CHANGE_ADDR_SUBS_LIMIT
+
+    @limit_change_addr_subs.setter
+    def limit_change_addr_subs(self, val: int):
+        val = max(val or 0, 0)  # Guard against bool, None, or negative
+        self.storage.put('limit_change_addr_subs', int(val))
+
+    def is_retired_change_addr(self, addr: Address) -> bool:
+        """ Returns True if the address in question is in the "retired change address" set (set maintained by
+        the synchronizer).  If the network is not started (offline mode), will always return False. """
+        assert isinstance(addr, Address)
+        if not self.synchronizer:
+            return False
+        sh = addr.to_scripthash_hex()
+        return sh in self.synchronizer.change_scripthashes_that_are_retired
 
 
 class Simple_Wallet(Abstract_Wallet):
@@ -3206,7 +3280,7 @@ class Deterministic_Wallet(Abstract_Wallet):
             addr_list.append(address)
             if save:
                 self.save_addresses()
-            self.add_address(address)
+            self.add_address(address, for_change=for_change)
             return address
 
     def synchronize_sequence(self, for_change):

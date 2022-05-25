@@ -311,7 +311,7 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
             QWidget().setLayout(prior_layout)
         self.main_widget.setLayout(layout)
         self.back_button.setEnabled(True)
-        self.next_button.setEnabled(next_enabled)
+        self.next_button.setEnabled(bool(next_enabled))
         if next_enabled:
             self.next_button.setFocus()
         self.main_widget.setVisible(True)
@@ -492,7 +492,7 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
         line = QLineEdit()
         line.setText(default)
         def f(text):
-            self.next_button.setEnabled(test(text))
+            self.next_button.setEnabled(bool(test(text)))
         line.textEdited.connect(f)
         vbox.addWidget(line)
         vbox.addWidget(WWLabel(warning))
@@ -514,7 +514,7 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
         line = QLineEdit()
         line.setText(default)
         def f(text):
-            self.next_button.setEnabled(test(text))
+            self.next_button.setEnabled(bool(test(text)))
         line.textEdited.connect(f)
         vbox.addWidget(line)
         vbox.addWidget(WWLabel(warning))
@@ -617,26 +617,6 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
             self.linux_hw_wallet_support_dialog = None
         else:
             self.show_error("Linux only facility. FIXME!")
-
-    def showEvent(self, event):
-        ret = super().showEvent(event)
-        from electroncash import networks
-        if networks.net is networks.TaxCoinNet and not self.config.get("have_shown_taxcoin_dialog"):
-            self.config.set_key("have_shown_taxcoin_dialog", True)
-            weakSelf = weakref.ref(self)
-            def do_dialog():
-                slf = weakSelf()
-                if not slf:
-                    return
-                QMessageBox.information(slf, _("Electron Cash - Tax Coin"),
-                                        _("For TaxCoin, your existing wallet files and configuration have "
-                                          "been duplicated in the subdirectory taxcoin/ within your Electron Cash "
-                                          "directory.\n\n"
-                                          "To use TaxCoin, you should select a server manually, and then choose one of "
-                                          "the starred servers.\n\n"
-                                          "After selecting a server, select a wallet file to open."))
-            QTimer.singleShot(10, do_dialog)
-        return ret
 
 
 class DerivationPathScanner(QThread):

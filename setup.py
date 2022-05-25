@@ -19,6 +19,9 @@ with open('contrib/requirements/requirements-hw.txt') as f:
 with open('contrib/requirements/requirements-binaries.txt') as f:
     requirements_binaries = f.read().splitlines()
 
+with open('contrib/requirements/requirements-web3.txt') as f:
+    requirements_web3 = f.read().splitlines()
+
 version = imp.load_source('version', 'electroncash/version.py')
 
 if sys.version_info[:3] < (3, 6):
@@ -123,9 +126,7 @@ class MakeAllBeforeSdist(setuptools.command.sdist.sdist):
 
 
 platform_package_data = {
-    'electroncash_gui.qt': [
-        'data/ard_mone.mp3'
-    ],
+    'electroncash_gui.qt': [],
 }
 
 if sys.platform in ('linux'):
@@ -149,7 +150,9 @@ setup(
     extras_require={
         'hardware': requirements_hw,
         'gui': requirements_binaries,
-        'all': requirements_hw + requirements_binaries
+        # 'all' is a bit of a misnomer since it is lacking web3
+        'all': requirements_hw + requirements_binaries,
+        'web3': requirements_hw + requirements_binaries + requirements_web3,
     },
     packages=[
         'electroncash',
@@ -184,7 +187,6 @@ setup(
             'servers_testnet.json',
             'servers_testnet4.json',
             'servers_scalenet.json',
-            'servers_taxcoin.json',
             'currencies.json',
             'www/index.html',
             'wordlist/*.txt',

@@ -338,7 +338,7 @@ class ElectrumGui(QObject, PrintError):
 
     def set_dark_theme_if_needed(self):
         if sys.platform in ('darwin',):
-            # On OSX, qdarkstyle is kind of broken. We instead rely on Mojave
+            # On OSX, qdarkstyle is kind of broken (bad UI). We instead rely on Mojave
             # dark mode if (built in to the OS) for this facility, which the
             # user can set outside of this application.
             use_dark_theme = False
@@ -356,11 +356,9 @@ class ElectrumGui(QObject, PrintError):
             except BaseException as e:
                 use_dark_theme = False
                 self.print_error('Error setting dark theme: {}'.format(repr(e)))
-        # Apply any necessary stylesheet patches. For now this only does anything
-        # if the version is < 2.6.8.
-        # 2.6.8+ seems to have fixed all the issues (for now!)
+        # Apply any necessary stylesheet patches
         from . import style_patcher
-        style_patcher.patch(dark=use_dark_theme, darkstyle_ver=darkstyle_ver)
+        style_patcher.patch(use_dark_theme=use_dark_theme, darkstyle_ver=darkstyle_ver)
         # Even if we ourselves don't set the dark theme,
         # the OS/window manager/etc might set *a dark theme*.
         # Hence, try to choose colors accordingly:
@@ -763,7 +761,7 @@ class ElectrumGui(QObject, PrintError):
             interval = 10.0*1e3 # do it very soon (in 10 seconds)
         else:
             interval = 4.0*3600.0*1e3 # once every 4 hours (in ms)
-        self.update_checker_timer.start(interval)
+        self.update_checker_timer.start(int(interval))
         self.print_error("Auto update check: interval set to {} seconds".format(interval//1e3))
 
     def _stop_auto_update_timer(self):
@@ -1010,6 +1008,9 @@ class ElectrumGui(QObject, PrintError):
             event = QEvent(QEvent.Clipboard)
             self.app.sendEvent(self.app.clipboard(), event)
             self.tray.hide()
+            if self.nd:
+                self.nd.deleteLater()
+                self.nd = None
         self.app.aboutToQuit.connect(clean_up)
 
         Exception_Hook(self.config) # This wouldn't work anyway unless the app event loop is active, so we must install it once here and no earlier.
