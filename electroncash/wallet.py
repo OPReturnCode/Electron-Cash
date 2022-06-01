@@ -3203,7 +3203,11 @@ class RpaWallet(ImportedWalletBase):
         self.rpa_manager.rpa_phase_1_mempool()
         return
 
-    
+    def rebuild_history(self):
+        self.storage.put('rpa_height', 743000)  # ask from the user in later iterations
+        super(RpaWallet, self).rebuild_history()
+
+
 class Deterministic_Wallet(Abstract_Wallet):
 
     def __init__(self, storage):
