@@ -11,6 +11,7 @@ This implements the functionality for RPA (Reusable Payment Address) aka Paycode
 '''
 
 from decimal import Decimal as PyDecimal
+import time
 
 from . import addr
 from .. import bitcoin
@@ -204,6 +205,12 @@ def generate_transaction_from_paycode(wallet, config, amount, rpa_paycode=None, 
     paycode_field_spend_pubkey = paycode_hex[70:136]
     paycode_field_expiry = paycode_hex[136:144]
     paycode_field_checksum = paycode_hex[144: 154]
+
+    paycode_expiry = int.from_bytes(bytes.fromhex(paycode_field_expiry), byteorder='big', signed=False)
+    if paycode_expiry != 0:
+        one_week_from_now = int(time.time()) + 604800
+        if paycode_expiry < one_week_from_now:
+            raise BaseException('Paycode expired.')
 
     # Initialize a few variables for the transaction
     tx_fee = _satoshis(fee)
