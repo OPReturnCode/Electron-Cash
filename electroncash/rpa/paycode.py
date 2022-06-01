@@ -168,6 +168,8 @@ def generate_paycode(wallet, prefix_size="10"):
 
     # Fields of the paycode
     version = "01"
+    if networks.net.TESTNET:
+        version = "05"
     scanpubkey = wallet.derive_pubkeys(0, 0)
     spendpubkey = wallet.derive_pubkeys(0, 1)
     expiry = "00000000"
