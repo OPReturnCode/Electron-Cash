@@ -64,7 +64,7 @@ from . import bitcoin
 from . import coinchooser
 from .synchronizer import Synchronizer
 from .verifier import SPV, SPVDelegate
-from .rpa_manager import Rpa_manager
+from .rpa.rpa_manager import Rpa_manager
 from . import schnorr
 from . import ecc_fast
 from .blockchain import NULL_HASH_HEX

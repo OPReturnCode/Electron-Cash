@@ -29,10 +29,10 @@ import traceback
 import time
 import queue
 
-from .transaction import Transaction
-from .util import ThreadJob, bh2u
-from . import networks
-from .bitcoin import InvalidXKeyFormat
+from electroncash.transaction import Transaction
+from electroncash.util import ThreadJob, bh2u
+from electroncash import networks
+from electroncash.bitcoin import InvalidXKeyFormat
 
 
 class Rpa_manager(ThreadJob):
