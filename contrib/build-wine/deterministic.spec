@@ -13,12 +13,12 @@ home = 'C:\\electroncash\\'
 # see https://github.com/pyinstaller/pyinstaller/issues/2005
 hiddenimports = []
 hiddenimports += ['PyQt5.sip']
+hiddenimports += ['cryptography']
 hiddenimports += collect_submodules('trezorlib')
 hiddenimports += collect_submodules('btchip')
 hiddenimports += collect_submodules('keepkeylib')
 hiddenimports += collect_submodules('satochip')    # Satochip
 hiddenimports += collect_submodules('smartcard')   # Satochip
-hiddenimports += collect_submodules('cryptography')
 
 # Add libusb binary
 binaries = [("c:/tmp/libusb-1.0.dll", ".")]
