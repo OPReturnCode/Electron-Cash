@@ -18,6 +18,7 @@ hiddenimports += collect_submodules('btchip')
 hiddenimports += collect_submodules('keepkeylib')
 hiddenimports += collect_submodules('satochip')    # Satochip
 hiddenimports += collect_submodules('smartcard')   # Satochip
+hiddenimports += collect_submodules('cryptography')
 
 # Add libusb binary
 binaries = [("c:/tmp/libusb-1.0.dll", ".")]
