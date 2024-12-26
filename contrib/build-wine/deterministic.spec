@@ -13,7 +13,7 @@ home = 'C:\\electroncash\\'
 # see https://github.com/pyinstaller/pyinstaller/issues/2005
 hiddenimports = []
 hiddenimports += ['PyQt5.sip']
-hiddenimports += ['cryptography.hazmat.primitives.hmac']
+hiddenimports += collect_all('cryptography')
 hiddenimports += collect_submodules('trezorlib')
 hiddenimports += collect_submodules('btchip')
 hiddenimports += collect_submodules('keepkeylib')
