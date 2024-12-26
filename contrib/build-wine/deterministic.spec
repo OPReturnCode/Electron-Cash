@@ -1,6 +1,6 @@
 # -*- mode: python3 -*-
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_dynamic_libs, collect_all
 
 import sys, os
 
